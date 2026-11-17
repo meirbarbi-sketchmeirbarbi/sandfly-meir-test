@@ -1,1 +1,244 @@
-
+diff --git a/shared.gradle b/shared.gradle
+index f8e6d93..38291c1 100644
+--- a/shared.gradle
++++ b/shared.gradle
+@@ -4,7 +4,7 @@
+ apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+ 
+ ext {
+-    talkbackApplicationId = "io.github.aaron_gh.sandfly"
++    talkbackApplicationId = "io.github.aaron_gh.sandfly.meirtest"
+ }
+ 
+ // ccache, when installed, for the CMake and ndk-build native libraries. Gradle's build cache does
+@@ -26,7 +26,7 @@ android {
+         ndk {
+             // x86_64 for emulators on Intel and AMD computers, such as Windows PCs,
+             // whose plain Android images can't run ARM code.
+-            abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
++            abiFilters "arm64-v8a"
+         }
+         if (ccache != null) {
+             externalNativeBuild {
+diff --git a/talkback/src/full/java/com/google/android/accessibility/talkback/distribution/Distribution.kt b/talkback/src/full/java/com/google/android/accessibility/talkback/distribution/Distribution.kt
+index bdfa4c8..c9c8e7a 100644
+--- a/talkback/src/full/java/com/google/android/accessibility/talkback/distribution/Distribution.kt
++++ b/talkback/src/full/java/com/google/android/accessibility/talkback/distribution/Distribution.kt
+@@ -38,7 +38,7 @@ object Distribution {
+ 
+   @JvmStatic
+   fun onServiceConnected(context: Context) {
+-    Updater.startAutomaticChecks(context)
++    // Isolated experimental build: official APKs cannot update this package.
+   }
+ 
+   @JvmStatic
+@@ -55,7 +55,10 @@ object Distribution {
+   /** Sets up the settings of the Updates screen that [fragment] shows, if it does. */
+   @JvmStatic
+   fun setUpPreferences(fragment: PreferenceFragmentCompat) {
+-    Updater.setUpPreferences(fragment)
++    fragment.findPreference<androidx.preference.Preference>(fragment.getString(R.string.pref_check_for_updates_key))?.apply {
++      summary = "Experimental build. Official updates are disabled for this separate app."
++      isEnabled = false
++    }
+   }
+ 
+   /** Shows the state of the settings of the Updates screen again, when [fragment] resumes. */
+diff --git a/talkback/src/main/AndroidManifest.xml b/talkback/src/main/AndroidManifest.xml
+index 404f58e..137b583 100644
+--- a/talkback/src/main/AndroidManifest.xml
++++ b/talkback/src/main/AndroidManifest.xml
+@@ -68,6 +68,7 @@
+ 
+     <!-- Required for calling Service.startForeground after API 28. -->
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+ 
+     <!-- Required for Primes. -->
+@@ -214,7 +215,11 @@
+             android:label="@string/talkback_title"
+             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+             android:settingsActivity="com.google.android.accessibility.talkback.preference.TalkBackPreferencesActivity"
+-            android:directBootAware="true">
++            android:directBootAware="true"
++            android:stopWithTask="false"
++            android:foregroundServiceType="specialUse">
++            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
++                android:value="User-enabled experimental screen reader; ongoing notification reduces unintended service termination. No wake lock or automatic re-enabling." />
+             <intent-filter>
+                 <action android:name="android.accessibilityservice.AccessibilityService" />
+ 
+diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/MeirServiceGuard.java b/talkback/src/main/java/com/google/android/accessibility/talkback/MeirServiceGuard.java
+new file mode 100644
+index 0000000..d81e787
+--- /dev/null
++++ b/talkback/src/main/java/com/google/android/accessibility/talkback/MeirServiceGuard.java
+@@ -0,0 +1,61 @@
++/* Copyright 2026. Licensed under the Apache License, Version 2.0.
++ * Experimental persistence mitigation. Not a guarantee against OEM force-stop. */
++package com.google.android.accessibility.talkback;
++
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.app.Service;
++import android.content.Intent;
++import android.content.pm.ServiceInfo;
++import android.os.Build;
++import android.util.Log;
++
++/** Keeps only the user-enabled reader in the foreground; never enables or restarts it. */
++final class MeirServiceGuard {
++  private static final String CHANNEL = "meir_reader_guard";
++  private static final int ID = 0x4d454952;
++  private MeirServiceGuard() {}
++
++  static void start(Service service) {
++    try {
++      NotificationManager manager = service.getSystemService(NotificationManager.class);
++      NotificationChannel channel = new NotificationChannel(
++          CHANNEL, "SandFly test running", NotificationManager.IMPORTANCE_LOW);
++      channel.setSound(null, null);
++      channel.enableVibration(false);
++      manager.createNotificationChannel(channel);
++      Intent settings = new Intent(service,
++          com.google.android.accessibility.talkback.preference.TalkBackPreferencesActivity.class);
++      PendingIntent pending = PendingIntent.getActivity(service, ID, settings,
++          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
++      Notification note = new Notification.Builder(service, CHANNEL)
++          .setSmallIcon(R.drawable.icon)
++          .setContentTitle(service.getString(R.string.meir_guard_title))
++          .setContentText(service.getString(R.string.meir_guard_text))
++          .setContentIntent(pending)
++          .setOngoing(true)
++          .setOnlyAlertOnce(true)
++          .setCategory(Notification.CATEGORY_SERVICE)
++          .build();
++      if (Build.VERSION.SDK_INT >= 34) {
++        service.startForeground(ID, note, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
++      } else {
++        service.startForeground(ID, note);
++      }
++      Log.i("MeirGuard", "Foreground protection active; no force-stop guarantee");
++    } catch (RuntimeException error) {
++      // Foreground-start restrictions must never crash or disable the reader.
++      Log.w("MeirGuard", "Foreground protection unavailable; reader remains active", error);
++    }
++  }
++
++  static void stop(Service service) {
++    try {
++      service.stopForeground(Service.STOP_FOREGROUND_REMOVE);
++    } catch (RuntimeException error) {
++      Log.w("MeirGuard", "Could not remove foreground notification", error);
++    }
++  }
++}
+diff --git a/talkback/src/main/java/com/google/android/accessibility/talkback/TalkBackService.java b/talkback/src/main/java/com/google/android/accessibility/talkback/TalkBackService.java
+index ad1633c..516ad2d 100644
+--- a/talkback/src/main/java/com/google/android/accessibility/talkback/TalkBackService.java
++++ b/talkback/src/main/java/com/google/android/accessibility/talkback/TalkBackService.java
+@@ -990,6 +990,7 @@ public class TalkBackService extends AccessibilityServiceCompat
+ 
+   @Override
+   public boolean onUnbind(Intent intent) {
++    MeirServiceGuard.stop(this);
+     LogUtils.d(TAG, "onUnbind start");
+     StallLog.stop();
+     // First, while Android may still be connected to SandFly.
+@@ -1031,6 +1032,7 @@ public class TalkBackService extends AccessibilityServiceCompat
+ 
+   @Override
+   public void onDestroy() {
++    MeirServiceGuard.stop(this);
+     unlockedBootHandler.removeCallbacks(checkUnlockedBoot);
+     if (userInterface != null) {
+       userInterface.unregisterAllListeners();
+@@ -2210,6 +2212,7 @@ public class TalkBackService extends AccessibilityServiceCompat
+   protected void onServiceConnected() {
+     ExitAfterTurnOff.cancel();
+     super.onServiceConnected();
++    MeirServiceGuard.start(this);
+     // A report sent after the screen reader is turned off, from a new process, includes its log.
+     ProblemReportSender.rememberProcess(this, "screen reader");
+     StallLog.start(this);
+@@ -2266,7 +2269,7 @@ public class TalkBackService extends AccessibilityServiceCompat
+       SandflyAi.getFeatures().onServiceConnected(this);
+     }
+     // Turns Backtalk under its old app ID off, before this one says it is on.
+-    AppIdHandOver.onServiceConnected(this, this::refreshGestureDetection);
++    // Isolated experiment: do not hand over, disable or uninstall any other reader.
+ 
+     compositor.handleEvent(Compositor.EVENT_SPOKEN_FEEDBACK_ON, talkbackOnEventId);
+ 
+diff --git a/talkback/src/main/res/values-iw/strings.xml b/talkback/src/main/res/values-iw/strings.xml
+index 4290a7d..d40be6d 100644
+--- a/talkback/src/main/res/values-iw/strings.xml
++++ b/talkback/src/main/res/values-iw/strings.xml
+@@ -1271,7 +1271,7 @@
+   <string name="talkback_keep_on_button">לא, התחרטתי</string>
+   <string name="talkback_speech_bubble_label">@string/talkback_label</string>
+   <string name="close_string">סגירה</string>
+-  <string name="talkback_label">SandFly</string>
++  <string name="talkback_label">SandFly Meir Test</string>
+     <string name="title_pref_tts_engine">מנוע טקסט לדיבור</string>
+     <string name="title_pref_system_tts_settings">הגדרות מערכת טקסט לדיבור</string>
+     <string name="title_selector_vertical_navigation">ניווט אנכי</string>
+diff --git a/talkback/src/main/res/values/strings.xml b/talkback/src/main/res/values/strings.xml
+index ae8afdd..3992f4b 100644
+--- a/talkback/src/main/res/values/strings.xml
++++ b/talkback/src/main/res/values/strings.xml
+@@ -3,7 +3,7 @@
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2" xmlns:tools="http://schemas.android.com/tools">
+ 
+     <!--The human-readable name of this service. Do not translate. -->
+-    <string name="talkback_title" translatable="false">SandFly</string>
++    <string name="talkback_title" translatable="false">SandFly Meir Test</string>
+     <!-- Title of the setting that opens Android's screen for setting SandFly as the live wallpaper, which keeps SandFly running on phones whose battery savers stop background apps. [CHAR_LIMIT=60] -->
+     <string name="title_pref_sandfly_wallpaper">Use SandFly as the wallpaper</string>
+     <!-- Shown under the setting while SandFly is the wallpaper. [CHAR_LIMIT=60] -->
+@@ -4978,7 +4978,7 @@
+   <!-- Label for close. [CHAR_LIMIT=NONE] -->
+   <string name="close_string">Close</string>
+   <!-- TalkBack label. [CHAR_LIMIT=NONE]-->
+-  <string name="talkback_label">SandFly</string>
++  <string name="talkback_label">SandFly Meir Test</string>
+ 
+ 
+     <!-- Settings entry that saves all of SandFly's settings to a file. [CHAR_LIMIT=NONE] -->
+@@ -4993,4 +4993,6 @@
+     <string name="settings_import_done">Settings imported</string>
+     <!-- Message when a file could not be read as SandFly settings. [CHAR_LIMIT=NONE] -->
+     <string name="settings_import_failed">This file is not a SandFly or Backtalk settings file, or could not be read</string>
++    <string name="meir_guard_title">SandFly Meir Test פעיל</string>
++    <string name="meir_guard_text">ניסיון לצמצום הפסקות. כיבוי דרך הגדרות הנגישות.</string>
+ </resources>
+diff --git a/utils/src/main/java/com/google/android/accessibility/utils/output/FailoverTextToSpeech.java b/utils/src/main/java/com/google/android/accessibility/utils/output/FailoverTextToSpeech.java
+index f650ad6..f6c69a1 100644
+--- a/utils/src/main/java/com/google/android/accessibility/utils/output/FailoverTextToSpeech.java
++++ b/utils/src/main/java/com/google/android/accessibility/utils/output/FailoverTextToSpeech.java
+@@ -280,7 +280,7 @@ public class FailoverTextToSpeech {
+    * whose settings don't have the switch.
+    */
+   public static boolean lowLatencyAudioDefault(Context context) {
+-    return !context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WATCH);
++    return false; // Meir test: standard audio path; the setting remains user-configurable.
+   }
+ 
+   /** Engines that gave no audio when synthesizing to a file, which speak the usual way. */
+diff --git a/version.gradle b/version.gradle
+index fc28bae..5e05f9f 100644
+--- a/version.gradle
++++ b/version.gradle
+@@ -3,7 +3,7 @@ ext { talkbackVersionName = "TfPu_release_16_2" }
+ // SandFly's version. A stable release is built with -Psandfly.release=true and tagged
+ // v<version>; other builds are <version>-dev. Raise it after each stable release.
+ ext {
+-    sandflyVersion = "0.5.0"
++    sandflyVersion = "0.5.0-meir-exp1"
+     sandflyVersionName = sandflyVersion + (providers.gradleProperty("sandfly.release").getOrElse("false") == "true" ? "" : "-dev")
+ }
+ 
