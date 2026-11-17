@@ -1,0 +1,61 @@
+name: Build SandFly Meir Test
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: mine
+      - uses: actions/checkout@v7
+        with:
+          repository: aaron-gh/SandFly
+          ref: 1547dd63bbced659e9cbeb712c607d28c2b4b566
+          fetch-depth: 0
+          path: src
+      - name: Apply patch
+        run: |
+          cd src
+          git apply --whitespace=nowarn ../mine/meir-persistence-only.patch
+          git diff --stat
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          build-root-directory: src
+      - name: Build phone-full debug APK
+        working-directory: src
+        run: ./gradlew :assemblePhoneFullDebug --console=plain
+      - name: Verify and collect APK
+        run: |
+          apk=$(find src/build/outputs/apk -name '*.apk' | head -n 1)
+          test -n "$apk"
+          cp "$apk" sandfly-meir-test.apk
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          "$apksigner" verify --print-certs sandfly-meir-test.apk | tee cert.txt
+          sha256sum sandfly-meir-test.apk | tee sha.txt
+          "$ANDROID_HOME"/build-tools/*/aapt2 dump badging sandfly-meir-test.apk | grep -E "^package:|application-label:" | tee badging.txt || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sandfly-meir-test
+          path: |
+            sandfly-meir-test.apk
+            cert.txt
+            sha.txt
+            badging.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="test-${GITHUB_RUN_NUMBER}"
+          {
+            echo "Unofficial experimental build of SandFly v0.5.0 (commit 1547dd6) with a foreground-service change. Separate app (package io.github.aaron_gh.sandfly.meirtest). Debug-signed. Not tested on a device."
+            echo
+            cat sha.txt
+          } > notes.md
+          gh release create "$tag" sandfly-meir-test.apk --repo "$GITHUB_REPOSITORY" --title "SandFly Meir Test $tag" --notes-file notes.md --prerelease
